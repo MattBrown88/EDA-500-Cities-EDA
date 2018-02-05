@@ -1,0 +1,245 @@
+---
+title: "Exploratory Data Analysis of the CDC’s ‘500 Cities Project’ - Part 2"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In [Part 1](https://redoakstrategic.com/exploratory_data_analysis_cdc_500_cities_r_shiny/), we built an application to geographically explore the [*500 Cities Project dataset*](https://www.cdc.gov/500cities/) from the CDC. In this post, we will demonstrate other exploratory data analysis (EDA) techniques for exploring a new dataset. The analysis will be done with R packages *data.table*, *ggplot2* and *highcharter*.
+
+In this post, you will learn how to:
+
+* Build a boxplot
+* Build and plot a correlation matrix
+* Build a histogram
+
+
+# Load Dataset
+
+It may take a few minutes to download the data. The data is also available [here.](https://chronicdata.cdc.gov/500-Cities/500-Cities-Local-Data-for-Better-Health-2017-relea/6vp6-wxuq)
+```{r}
+library(data.table)
+df <- fread('https://chronicdata.cdc.gov/api/views/6vp6-wxuq/rows.csv?accessType=DOWNLOAD')
+```
+
+The dataset contains values from cities across the country for 28 separate health measures. The full measure names are cumbersome so for the remainder of the post, we will use the Short_Question_Text which is an abbreviated form of the full measure name. Here are the full measure names and their corresponding abbreviations for reference.
+
+```{r pressure, echo=FALSE}
+data.frame(Measure = substr(unique(df$Measure), 1, 40), Short_Question_Text =  substr(unique(df$Short_Question_Text), 1, 30))
+```
+
+# Boxplots
+
+Boxplots graphically depict groups of numerical data through their quartiles. Outliers are shown as points above and below the boxes. This is a good first step in EDA because it shows the range of values associated with each measure. Here we will build a boxplot for each measure in the dataset grouped by category. Each boxplot is built from 500 values, one value for each city.
+
+``` {r, fig.height = 8, fig.width = 10}
+library(ggplot2)
+df_subset <- df[df$GeographicLevel == 'City',]
+
+# grouped boxplot
+ggplot(df_subset, aes(x=substr(Short_Question_Text, 1,40), y=Data_Value, fill = Category )) + 
+    geom_boxplot() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = 'bottom') +
+  facet_wrap(~Category,scales = "free_x") + xlab('Measure') + ylab('Percentage')
+
+```
+
+
+The boxplots show a wide distribution for most of the measures, especially among the preventive measures. Next we will analyze dependence between measures.
+
+# Correlation Plot
+
+The second EDA technique we will demonstrate is a correlation plot which is used to show dependence between measures. The correlation between measures is given by a number between -1 and 1 (1 means perfectly positively correlated and -1 means perfectly negatively correlated). The dataset contains values for each measure at three different geographic levels: US, City, and Census Tract.  To compute the correlations, we will use data at the Census Tract level which is the smallest geographic level. The correlation plot will compare the measure values at each Census Tract to determine their correlation coefficient.
+
+The steps to compute a correlation matrix in R are as follows:
+
+* Subset the dataset to select only the necessary columns
+* Convert the dataset to a wide-format
+* Calculate correlations
+* Plot the correlation matrix
+
+## Subset the dataset
+
+We only want the location (UniqueID), the measure (Short_Question_Text) and the value (Data_Value) columns in our dataset. We only want rows where GeographicLevel is Census Tract. We subset the dataset to remove the rows and columns which aren't relevant to our analysis.
+
+``` {r}
+df_subset <- df[GeographicLevel == 'Census Tract', c('UniqueID','Short_Question_Text', 'Data_Value')]
+head(df_subset)
+````
+
+## Convert to Wide Format
+
+The R correlation function *cor()* requires that the dataset is in wide-format. The dcast function from the *data.table* package simplies the task of converting the dataset into wide-format. Essentially, the dcast function creates a new column for each unique Short_Question_Text (i.e. it 'casts' the Short_Question_Text into wide format) and inputs the Data_Value as the value for that column. The UniqueID is designated as the row name because it is not actually part of the correlation calculation.
+
+``` {r}
+df_wide <- dcast(df_subset, UniqueID ~ Short_Question_Text, value.var = 'Data_Value')
+row.names(df_wide) <- df_wide$UniqueID 
+df_wide$UniqueID <- NULL
+df_wide <- df_wide[complete.cases(df_wide),] #Removes any rows with NA values
+head(df_wide[,1:5])
+```
+
+## Compute Correlation Matrix
+
+Now that the data is in the appropriate format, we can use the R function *cor()* to compute the correlations. We apply the *cor()* function to the wide-format data to compute the correlation between measures.
+
+``` {r}
+cor_plot <- cor(df_wide)
+cor_plot <- round(cor_plot, 2)
+head(cor_plot[,1:5])
+```
+As you can see, the output is a dataframe with values between 1 and -1. We will plot this result to make it easier to understand and analyze.
+
+## Plot the Correlation Matrix with Highcharts
+
+*Highcharter* is an R wrapper for the *Highcharts* library. *Highcharts* is a data visualization library which makes it simple to develop interactive charts. The *hchart()* function can be applied to the R correlation function output to build a correlation plot.
+
+``` {r}
+library(highcharter)
+hchart(cor_plot)
+
+```
+
+
+## Reorder the Correlation Plot
+
+While this is better than the tabular form, we can make it more clear by grouping correlated features together. We will use a helper function which I found [here](http://www.sthda.com/english/wiki/ggplot2-quick-correlation-matrix-heatmap-r-software-and-data-visualization) to reorder the correlation plot.
+
+``` {r}
+reorder_cormat <- function(cormat){
+# Use correlation between variables as distance
+dd <- as.dist((1-cormat)/2)
+hc <- hclust(dd)
+cormat <-cormat[hc$order, hc$order]
+}
+
+cor_plot <- reorder_cormat(cor_plot)
+hchart(cor_plot)
+```
+
+The correlation plot yields some interesting insights. The first thing I noticed is that binge drinking is negatively correlated with many of the poor health outcomes (e.g. obesity, high cholesterol, stroke, diabetes). My first thought on this is that binge drinking is more common among young people who generally don't have as many health issues as older people. However we would need to analyze data on binge drinking more extensively to derive solid conclusions.
+
+Another insight is lack of health insurance is positively correlated with negative health outcomes (i.e. people without health insurance experience worse health outcomes). This is interesting although not surprising. In the next section, we will drill into the health insurance measure to analyze how it differs across the nation.
+
+# Health Insurance Histograms
+
+First, we will compute the summary statistics and build a histogram for health insurance across the dataset by city.
+
+``` {r}
+df_health <- subset(df, Short_Question_Text == 'Health Insurance')
+df_health <- subset(df_health, GeographicLevel == 'City' & DataValueTypeID == 'AgeAdjPrv')
+summary(df_health$Data_Value)
+```
+
+There is a wide range of health insurance coverage across the cities in the dataset with a difference between the best and worst of about 45 percent.
+
+``` {r}
+hist(df_health$Data_Value, col = 'gray', breaks = 20)
+
+```
+
+The histogram shows the data is skewed to the right. 
+
+Next, we will find the cities which have the highest percentage of their population lacking health insurance.
+
+``` {r}
+library(ggplot2)
+df_health <- subset(df, Short_Question_Text == 'Health Insurance')
+df_health <- subset(df_health, GeographicLevel == 'City' & DataValueTypeID == 'AgeAdjPrv')
+df_health <- df_health[order(df_health$Data_Value, decreasing = TRUE),]
+df_health$City <- paste0(df_health$CityName, ',', df_health$StateAbbr)
+
+ggplot(df_health[1:20,], hcaes(x = reorder(City, Data_Value), y = Data_Value, fill = Data_Value)) +
+geom_bar(stat = "identity",col = "black")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = 'none') +
+  ggtitle('The 20 cities in the USA with the lowest percentage of health insurance', subtitle = 'Texas leads the way with 6 of the top 7') +
+  xlab('City') + ylab('Percent Uninsured')
+
+```
+
+Pharr, TX leads the way with nearly half of their population lacking health insurance and Texas leads the way with 6 of the top 7 cities. 
+
+However Texas is a large state and they may simply have more cities in the dataset than other states. Next we will calculate the ratio of cities from each state in the top 100 with regards to lack of health insurance in comparison to the total number of cities in the dataset. The steps to complete this calculation are:
+
+* Select the top 100 cities by lack of health insurance
+* Count cities in the top 100 for each state
+* Count the total cities in the dataset for each state
+* Divide the number of cities in the top 100 by the total number of cities in the dataset
+
+Select the top 100 cities by lack of health insurance.
+``` {r}
+#Subset dataset
+df_health <- subset(df, Short_Question_Text == 'Health Insurance')
+df_health <- subset(df_health, GeographicLevel == 'City' & DataValueTypeID == 'AgeAdjPrv')
+df_health <- df_health[order(df_health$Data_Value, decreasing = TRUE),] #Order rows by Data_Value
+df_health_100 <- df_health[1:100,] #Select only the top 100 rows
+head(df_health_100[,1:5])
+
+```
+
+
+Count the number of cities in the top 100 by state using the aggregate function.
+``` {r}
+agg_100 <- aggregate(df_health_100$Year, by = list(df_health_100$StateDesc), FUN = length) 
+agg_100 <- agg_100[order(agg_100$x, decreasing = TRUE),]
+head(agg_100)
+```
+
+Plot the results.
+
+``` {r}
+library(ggplot2)
+ggplot(agg_100, aes(x = reorder(Group.1, x), y = x, fill = x)) +
+geom_bar(stat = "identity",col = "black")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = 'none') + 
+  ggtitle('Number of cities in top 100 for percent uninsured by state', subtitle = 'Texas and California lead the way by a wide margin') +
+  xlab('State') + ylab('Percent Uninsured')
+
+```
+
+We can see Texas and California lead the way with the most cities in the top 100. This makes sense because they are two of the largest states.
+
+Count the number of cities in the dataset for each state. 
+``` {r}
+df_health <- subset(df, Short_Question_Text == 'Health Insurance')
+df_health <- subset(df_health, GeographicLevel == 'City' & DataValueTypeID == 'AgeAdjPrv')
+agg <- aggregate(df_health$Year, by = list(df_health$StateDesc), FUN = length)
+agg <- agg[order(agg$x, decreasing = TRUE),]
+
+#Plot the top 20
+ggplot(agg[1:20,], aes(x = reorder(Group.1, x), y = x, fill = x)) +
+geom_bar(stat = "identity",col = "black") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = 'none') + 
+  ggtitle('The number of cities from each state in the 500 Cities dataset (Top 20)', subtitle = 'California leads the way by a wide margin') + 
+  xlab('State') + ylab('Number of Cities') 
+
+```
+
+California and Texas also lead the way with the most cities in the top 100. Now, we will divide the number of cities in the top 100 by the total number of cities in the dataset to create a more accurate comparison of states.
+
+``` {r}
+agg_merged <- setNames(merge(agg_100, agg, by = 'Group.1'), c('city', 'health_cities', 'total_cities'))
+agg_merged$Ratio <- agg_merged$health_cities / agg_merged$total_cities
+head(agg_merged)
+```
+
+Plot the ratio to see how the states compare.
+``` {r}
+
+ggplot(agg_merged, aes(x = reorder(city, Ratio), y = Ratio, fill = Ratio)) +
+geom_bar(stat = 'identity', color = 'black')+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = 'none') +
+  ggtitle('Ratio of number of cities in the top 100 over number of cities in the dataset') +
+  xlab('State')
+
+```
+
+The plot now paints a different picture then the raw data. New Jersey leads the way with nearly 80% of their cities in the top 100. 
+
+Th purpose of this post was to demonstrate common exploratory data analysis techniques. The goal of exploratory data analysis is to provide an understanding of the dataset and generate questions to analyze further. From this analysis, I would be curious as to why New Jersey lacks health insurance. I would also be curious if the lack of health insurance actually causes poor health outcomes, or if there are other factors in play.
+
+As you delve deeper into datasets, you will almost always generate questions that you didn't think of prior to starting the analyis. This is the one of the key values of EDA. 
